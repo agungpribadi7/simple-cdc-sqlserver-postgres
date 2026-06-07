@@ -1,0 +1,157 @@
+services:
+  # ---------------------------------------------------------
+  # 1. REGIONAL SOURCES: 3 Isolated SQL Server Instances
+  # ---------------------------------------------------------
+  sqlserver-jakarta:
+    image: mcr.microsoft.com/azure-sql-edge:latest
+    container_name: sqlserver-jakarta
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=SuperStrong!Password123
+      - MSSQL_AGENT_ENABLED=true
+    ports:
+      - "1433:1433"
+
+  sqlserver-semarang:
+    image: mcr.microsoft.com/azure-sql-edge:latest
+    container_name: sqlserver-semarang
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=SuperStrong!Password123
+      - MSSQL_AGENT_ENABLED=true
+    ports:
+      - "1434:1433"
+
+  sqlserver-surabaya:
+    image: mcr.microsoft.com/azure-sql-edge:latest
+    container_name: sqlserver-surabaya
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=SuperStrong!Password123
+      - MSSQL_AGENT_ENABLED=true
+    ports:
+      - "1435:1433"
+
+  # ---------------------------------------------------------
+  # 2. TARGET: PostgreSQL (Central App Backend)
+  # ---------------------------------------------------------
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=app_db
+    ports:
+      - "5432:5432"
+
+  # ---------------------------------------------------------
+  # 3. MESSAGE BUS: Kafka (Confluent 8.1.3 KRaft)
+  # ---------------------------------------------------------
+  kafka:
+    image: confluentinc/cp-kafka:8.1.3
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk' # Required for Confluent 8.x
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8085:8080"
+    environment:
+      - KAFKA_CLUSTERS_0_NAME=Ride-Share-Cluster
+      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka:29092
+    depends_on:
+      - kafka
+
+  # ---------------------------------------------------------
+  # 4. DATA CAPTURE: Kafka Connect (Debezium + JDBC)
+  # ---------------------------------------------------------
+  connect:
+    image: confluentinc/cp-kafka-connect:8.1.3
+    container_name: connect
+    depends_on:
+      - kafka
+      - sqlserver-jakarta
+      - sqlserver-semarang
+      - sqlserver-surabaya
+    ports:
+      - "8083:8083"
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: 'kafka:29092'
+      CONNECT_REST_ADVERTISED_HOST_NAME: connect
+      CONNECT_GROUP_ID: compose-connect-group
+      CONNECT_CONFIG_STORAGE_TOPIC: docker-connect-configs
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_TOPIC: docker-connect-offsets
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_TOPIC: docker-connect-status
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "true"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "true"
+      CONNECT_PLUGIN_PATH: "/usr/share/java,/usr/share/confluent-hub-components"
+    command:
+      - bash
+      - -c
+      - |
+        echo "Installing Connectors..."
+        confluent-hub install --no-prompt debezium/debezium-connector-sqlserver:latest
+        confluent-hub install --no-prompt confluentinc/kafka-connect-jdbc:latest
+        echo "Launching Connect..."
+        /etc/confluent/docker/run
+
+  # ---------------------------------------------------------
+  # 5. STREAM PROCESSING: Apache Flink 1.20
+  # ---------------------------------------------------------
+  jobmanager:
+    image: flink:2.1
+    container_name: flink-jobmanager
+    ports:
+      - "8081:8081"
+    command: jobmanager
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+        parallelism.default: 1
+
+  taskmanager:
+    image: flink:2.1
+    container_name: flink-taskmanager
+    depends_on:
+      - jobmanager
+    command: taskmanager
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+        taskmanager.numberOfTaskSlots: 2
+        parallelism.default: 1
+
+  # ---------------------------------------------------------
+  # 6. ANALYTICS: StarRocks (Live Operations Dashboard)
+  # ---------------------------------------------------------
+  starrocks:
+    image: starrocks/allin1-ubuntu:latest
+    container_name: starrocks
+    ports:
+      - "9030:9030"
+      - "8030:8030"
+    environment:
+      - TZ=UTC
